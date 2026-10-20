@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="未加工の共有ドライブ403ファイルを対象にしたRAGシステムの設計・実装と、効いた工夫と効かなかった施策の記録。">
+<title>共有ドライブRAG構築記</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+
+<style>
+:root {
+  --paper:      #F4F6F9;
+  --surface:    #FFFFFF;
+  --surface-2:  #EDF0F5;
+  --rule:       #D7DDE7;
+  --rule-soft:  #E4E9F0;
+  --text:       #16202F;
+  --text-2:     #545F79;
+  --text-3:     #7C879E;
+  --accent:     #A0631A;
+  --accent-2:   #C98B3A;
+  --accent-bg:  #F5E9D8;
+  --pos:        #2B6B50;
+  --neg:        #A24136;
+  --shadow:     0 1px 2px rgba(16,23,37,.06), 0 8px 24px rgba(16,23,37,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:     #0C1220;
+    --surface:   #131B2B;
+    --surface-2: #0F1725;
+    --rule:      #253048;
+    --rule-soft: #1C2537;
+    --text:      #E4E9F2;
+    --text-2:    #9EAAC2;
+    --text-3:    #77839C;
+    --accent:    #DFA65A;
+    --accent-2:  #B98442;
+    --accent-bg: #241D12;
+    --pos:       #5CB78C;
+    --neg:       #DE7568;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"] {
+  --paper:     #0C1220;
+  --surface:   #131B2B;
+  --surface-2: #0F1725;
+  --rule:      #253048;
+  --rule-soft: #1C2537;
+  --text:      #E4E9F2;
+  --text-2:    #9EAAC2;
+  --text-3:    #77839C;
+  --accent:    #DFA65A;
+  --accent-2:  #B98442;
+  --accent-bg: #241D12;
+  --pos:       #5CB78C;
+  --neg:       #DE7568;
+  --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.3);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", "Yu Gothic", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.85;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1000px; margin: 0 auto; padding: 0 28px 96px; }
+
+/* ---------- masthead ---------- */
+.mast {
+  padding: 76px 0 40px;
+  border-bottom: 1px solid var(--rule);
+}
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 22px;
+}
+h1 {
+  font-family: "Shippori Mincho B1", "Yu Mincho", serif;
+  font-weight: 700;
+  font-size: clamp(34px, 5.4vw, 54px);
+  line-height: 1.28;
+  letter-spacing: .01em;
+  margin: 0 0 20px;
+  text-wrap: balance;
+}
+.standfirst {
+  font-size: 17px;
+  color: var(--text-2);
+  max-width: 62ch;
+  margin: 0;
+}
+
+/* ---------- stat strip ---------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 40px 0 0;
+}
+.stat { background: var(--surface); padding: 18px 20px; }
+.stat dt {
+  font-size: 11.5px;
+  letter-spacing: .08em;
+  color: var(--text-3);
+  margin: 0 0 4px;
+}
+.stat dd {
+  margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 600;
+  font-size: 23px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
+}
+.stat dd small { font-size: 13px; font-weight: 400; color: var(--text-2); margin-left: 3px; }
+
+/* ---------- sections ---------- */
+.sec {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 36px;
+  padding: 54px 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.sec:last-of-type { border-bottom: 0; }
+.rail { position: relative; }
+.rail-label {
+  position: sticky;
+  top: 24px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding-top: 8px;
+  border-top: 2px solid var(--accent);
+  display: inline-block;
+}
+.body > *:first-child { margin-top: 0; }
+.body > *:last-child { margin-bottom: 0; }
+
+h2 {
+  font-family: "Shippori Mincho B1", "Yu Mincho", serif;
+  font-weight: 700;
+  font-size: 27px;
+  line-height: 1.45;
+  margin: 0 0 18px;
+  text-wrap: balance;
+}
+h3 {
+  font-size: 15.5px;
+  font-weight: 700;
+  margin: 34px 0 10px;
+  letter-spacing: .01em;
+}
+h3 .tag {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--accent);
+  margin-right: 9px;
+  letter-spacing: .04em;
+}
+p { margin: 0 0 16px; max-width: 66ch; }
+.lede { font-size: 17px; color: var(--text-2); }
+strong { font-weight: 700; }
+code {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .875em;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: .1em .35em;
+}
+
+/* ---------- tables ---------- */
+.scroll { overflow-x: auto; margin: 22px 0; border: 1px solid var(--rule); border-radius: 3px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-size: 11.5px;
+  letter-spacing: .08em;
+  color: var(--text-3);
+  font-weight: 500;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; white-space: nowrap; }
+.best td { background: var(--accent-bg); }
+.best td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ---------- callouts ---------- */
+.note {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  padding: 18px 20px;
+  margin: 24px 0;
+}
+.note p { margin-bottom: 0; }
+.note .h {
+  font-size: 11.5px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 7px;
+}
+
+pre {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.75;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 15px 17px;
+  overflow-x: auto;
+  margin: 20px 0;
+}
+
+ul { margin: 0 0 16px; padding-left: 1.15em; max-width: 66ch; }
+li { margin-bottom: 7px; }
+li::marker { color: var(--accent); }
+
+/* ---------- verdict chips ---------- */
+.chip {
+  display: inline-block;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: .06em;
+  padding: 2px 8px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.chip.pos { color: var(--pos); }
+.chip.neg { color: var(--neg); }
+
+/* ---------- diagram ---------- */
+figure { margin: 26px 0; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption { font-size: 12.5px; color: var(--text-3); margin-top: 10px; }
+.d-box { fill: var(--surface); stroke: var(--rule); stroke-width: 1.2; }
+.d-box-a { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1.2; }
+.d-t { fill: var(--text); font-family: "Zen Kaku Gothic New", sans-serif; font-size: 13px; font-weight: 700; }
+.d-s { fill: var(--text-2); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; }
+.d-n { fill: var(--accent); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 600; }
+.d-line { stroke: var(--rule); stroke-width: 1.2; fill: none; }
+.d-arrow { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding-top: 24px;
+  margin-top: 40px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 760px) {
+  .sec { grid-template-columns: 1fr; gap: 14px; padding: 40px 0; }
+  .rail-label { position: static; }
+  .wrap { padding: 0 20px 64px; }
+  .mast { padding: 48px 0 32px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">SIGNATE / AI Engineering Challenge</p>
+  <h1>煩雑な共有ドライブを<br>読み解くRAGの作り方</h1>
+  <p class="standfirst">未加工の社内共有ドライブ403ファイルと質問文だけを入力に、100問へ自動回答するシステム。設問固有の知識をコードに一切持たせないという制約下で、何をどう作り、何が効いて何が効かなかったかの記録。</p>
+
+  <dl class="stats">
+    <div class="stat"><dt>対象ファイル</dt><dd>403<small>件 / 14形式</small></dd></div>
+    <div class="stat"><dt>検索チャンク</dt><dd>5,877<small>件</small></dd></div>
+    <div class="stat"><dt>エージェントの道具</dt><dd>9<small>種</small></dd></div>
+    <div class="stat"><dt>1実行の呼び出し</dt><dd>1,171<small>回</small></dd></div>
+    <div class="stat"><dt>最終スコア</dt><dd>0.5071<small>/ Private</small></dd></div>
+  </dl>
+</header>
+
+<!-- ============ 制約 ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">前提</span></div>
+  <div class="body">
+    <h2>設問を知らないシステムを作る</h2>
+    <p class="lede">このコンペの核心は精度ではなく制約にあった。禁止事項が、設計の自由度をほぼ決めてしまう。</p>
+    <p>規約は、人手で整理した一覧表の読み込み、設問ごとの参照ファイルや正解候補の事前作成、質問文を見て固定回答を返す分岐、特定案件名やファイル名を狙い撃ちした処理を、いずれも禁じていた。答えの金額・担当者名・ページ番号・セル番地をコードやプロンプトに書くことも認められない。</p>
+    <p>この制約を素直に受け取ると、作れるものは一つに絞られる。<strong>形式ごとの汎用的な読み取り器と、それを道具として使うエージェント</strong>である。案件の略称も、保護ファイルのパスワード導出規則も、決裁基準も、すべて実行時にドライブ内の該当文書を読んで解決させる。未知の案件フォルダが増えても同じ処理で動くことが、規約適合の証明そのものになる。</p>
+
+    <div class="note">
+      <p class="h">設計上の帰結</p>
+      <p>質問文による分岐は一箇所も存在しない。100問すべてが同一のエージェントループを通る。案件はフォルダ走査で列挙し、用語集に無い案件はフォルダ名で登録するフォールバックを持つ。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ パイプライン ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">全体像</span></div>
+  <div class="body">
+    <h2>4段のパイプライン</h2>
+    <p>抽出と索引は事前に一度だけ走る。以降は質問ごとにエージェントが道具を呼びながら答えに至る。中間生成物はすべて実行時に作られ、<code>--force</code> で全再生成できる。</p>
+
+    <figure>
+      <svg viewBox="0 0 900 250" role="img" aria-label="共有ドライブから抽出・索引・エージェントを経て回答に至る4段のパイプライン図">
+        <!-- stage 1 -->
+        <rect class="d-box" x="4" y="70" width="150" height="76" rx="3"/>
+        <text class="d-n" x="18" y="92">01</text>
+        <text class="d-t" x="18" y="112">共有ドライブ</text>
+        <text class="d-s" x="18" y="130">403 files / 14 fmt</text>
+
+        <!-- stage 2 -->
+        <rect class="d-box" x="196" y="70" width="164" height="76" rx="3"/>
+        <text class="d-n" x="210" y="92">02</text>
+        <text class="d-t" x="210" y="112">形式別の抽出</text>
+        <text class="d-s" x="210" y="130">書式・色・数式・図表</text>
+
+        <!-- stage 3 -->
+        <rect class="d-box" x="402" y="70" width="164" height="76" rx="3"/>
+        <text class="d-n" x="416" y="92">03</text>
+        <text class="d-t" x="416" y="112">索引と画像台帳</text>
+        <text class="d-s" x="416" y="130">BM25 5,877 chunks</text>
+
+        <!-- stage 4 (accent) -->
+        <rect class="d-box-a" x="608" y="70" width="164" height="76" rx="3"/>
+        <text class="d-n" x="622" y="92">04</text>
+        <text class="d-t" x="622" y="112">エージェント</text>
+        <text class="d-s" x="622" y="130">9 tools / 最大26手</text>
+
+        <!-- answer -->
+        <rect class="d-box" x="814" y="82" width="82" height="52" rx="3"/>
+        <text class="d-t" x="828" y="113">回答</text>
+
+        <!-- arrows -->
+        <path class="d-arrow" d="M158 108 L192 108"/><path class="d-arrow" d="M186 103 l7 5 -7 5"/>
+        <path class="d-arrow" d="M364 108 L398 108"/><path class="d-arrow" d="M392 103 l7 5 -7 5"/>
+        <path class="d-arrow" d="M570 108 L604 108"/><path class="d-arrow" d="M598 103 l7 5 -7 5"/>
+        <path class="d-arrow" d="M776 108 L810 108"/><path class="d-arrow" d="M804 103 l7 5 -7 5"/>
+
+        <!-- feedback loop: agent calls tools over the index/corpus -->
+        <path class="d-line" d="M690 146 L690 196 Q690 206 680 206 L294 206 Q284 206 284 196 L284 150"/>
+        <path class="d-arrow" d="M279 156 l5 -7 5 7"/>
+        <text class="d-s" x="430" y="226">道具を呼び、読み、計算し、また呼ぶ</text>
+
+        <!-- pre-pass label -->
+        <path class="d-line" d="M80 66 L80 36 Q80 28 88 28 L470 28 Q478 28 478 36 L478 66" stroke-dasharray="3 3"/>
+        <text class="d-s" x="196" y="20">事前に一度（再生成可能）</text>
+      </svg>
+      <figcaption>抽出と索引は再現可能な前処理。エージェントは索引と原本の双方に道具越しに触れる。</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ 抽出 ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">抽出</span></div>
+  <div class="body">
+    <h2>書式そのものが答えになる</h2>
+    <p class="lede">「太字の箇所は」「黄色ハイライトのセルの条件は」「何ページ目に載っているか」。この種の設問は、本文テキストだけ抜き出しても永久に解けない。</p>
+    <p>そこで抽出テキストに書式を埋め込む方式を採った。<code>[[bold]]…[[/]]</code>、<code>[[hl:yellow]]…[[/]]</code>、<code>[[color:red]]…[[/]]</code> のようなマーカーを本文中に差し込むことで、<strong>書式に関する問いが通常のテキスト検索の問いに変わる</strong>。図形の塗りは「塗り=red(...)」として書き出す。</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>形式</th><th class="num">件数</th><th>抽出しているもの</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">.docx</td><td class="num">46</td><td>書式ラン、表、見出し階層、レイアウト実測のページ割り</td></tr>
+          <tr><td class="mono">.pptx</td><td class="num">25</td><td>スライド本文、図形の塗り色、グラフの系列と値、ノート</td></tr>
+          <tr><td class="mono">.xlsx</td><td class="num">20</td><td>セル値と数式、塗り色の使用状況、オートフィルタ、ピボットキャッシュ、条件付き書式(dxf)、chartEx</td></tr>
+          <tr><td class="mono">.pdf</td><td class="num">28</td><td>ページ単位のテキスト、擬似イタリック検出、画像ページの切り出し</td></tr>
+          <tr><td class="mono">.ipynb</td><td class="num">11</td><td>セル入出力、埋め込み画像の分離</td></tr>
+          <tr><td class="mono">.png</td><td class="num">54</td><td>画像台帳へ登録、OCRで本文化</td></tr>
+          <tr><td class="mono">.csv / .tsv</td><td class="num">31</td><td>スキーマと統計、全件走査の対象</td></tr>
+          <tr><td class="mono">.py / .md / .json ほか</td><td class="num">188</td><td>プレーンテキストとして全文</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="tag">技法 A</span>テーマ色と tint の解決</h3>
+    <p>OOXML はセルや文字の色を「テーマ色の番号＋明度補正(tint)」で持つことがある。番号のままでは黄色かどうか判定できないため、<code>theme1.xml</code> を読んで実際のRGBに解決する。少数派の色をハイライトとみなすヒューリスティクスと組み合わせて、初めて「黄色ハイライト」が扱える。</p>
+
+    <h3><span class="tag">技法 B</span>ヒストグラムは chartEx にいる</h3>
+    <p>Excel 2016以降のヒストグラムは通常のグラフXMLではなく <code>chartEx</code> パートに、ビン分割の定義とともに格納される。ここを読まないとビン幅も度数も取れない。ただし今回のデータでは、ヒストグラムが<strong>画像として貼られている</strong>ブックもあり、そちらは最後まで正しく解けなかった。</p>
+
+    <h3><span class="tag">技法 C</span>ページ番号はXMLに存在しない</h3>
+    <p>docx や pptx に「何ページ目か」という情報は無い。レンダリング結果として初めて決まる。そこで MS Office の COM オートメーションで実際に開かせ、レイアウト実測のページ割りを取得して抽出テキストに書き込んだ。</p>
+
+    <h3><span class="tag">技法 D</span>斜体が斜体でない</h3>
+    <p>あるPDFのイタリックはフォント属性ではなく、テキスト行列 <code>Tm</code> の傾き成分（c≈0.3333）で擬似的に作られていた。フォントフラグを見るだけでは検出できないため、コンテンツストリームを解析して行列の歪みから斜体を判定している。</p>
+
+    <h3><span class="tag">技法 E</span>パスワードは規則から導く</h3>
+    <p>保護されたファイルのパスワードは、ドライブ内の規則文書に書かれたテンプレートから実行時に導出する。パスワードそのものをコードに書けば規約違反になるため、<strong>規則を読んで組み立てる</strong>以外に道がない。</p>
+  </div>
+</section>
+
+<!-- ============ 検索 ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">検索</span></div>
+  <div class="body">
+    <h2>形態素解析を使わない理由</h2>
+    <p>日本語の索引付けに文字バイグラム（＋ASCII語をまとめて1トークン）を選んだ。辞書が要らず、決定的で、<code>employment_length</code> や <code>Attr14</code> のような識別子めいた語を分割せずそのまま一致させられる。形態素解析器は未知語の切り方が辞書に依存し、この種の語彙を壊しやすい。</p>
+    <pre>BM25    k1 = 1.4    b = 0.72
+チャンク  5,877 件      語彙  72,998 種</pre>
+    <p>埋め込みベクトルによる意味検索は使っていない。設問の多くが「この案件のこのファイルの、この列」という指示的なもので、語の一致が効く。加えて、外部埋め込みモデルへの依存を避けられる利点があった。</p>
+  </div>
+</section>
+
+<!-- ============ エージェント ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">推論</span></div>
+  <div class="body">
+    <h2>9つの道具と、諦めさせない仕掛け</h2>
+    <p>エージェントは最大26手のループを回り、道具を呼びながら根拠を集めて <code>submit_answer</code> で確定する。</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>道具</th><th>役割</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">list_files</td><td>案件やパターンでファイルを絞り込む</td></tr>
+          <tr><td class="mono">search_corpus</td><td>抽出済み全文へのキーワード検索</td></tr>
+          <tr><td class="mono">read_document</td><td>本文を読む。offsetで続きへ、grepで範囲を絞る</td></tr>
+          <tr><td class="mono">locate_in_pages</td><td>語がどのページにあるかを引く</td></tr>
+          <tr><td class="mono">lookup_glossary</td><td>略称と案件名の対応を用語集から引く（259語）</td></tr>
+          <tr><td class="mono">run_python</td><td>サンドボックスで集計・相関・閾値探索を実際に計算する</td></tr>
+          <tr><td class="mono">list_images</td><td>ファイルや案件に紐づく画像を列挙（639件）</td></tr>
+          <tr><td class="mono">view_image</td><td>図・座席表・画像PDFを実際に見る</td></tr>
+          <tr><td class="mono">submit_answer</td><td>回答・根拠・確信度を提出する</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="tag">工夫 1</span>文脈の刈り込み</h3>
+    <p>会話は呼び出しのたびに膨らむ。60,000文字の予算を超えたら、<strong>直近4件の道具の結果は原文のまま、それ以前は要約状態に切り詰める</strong>。単一の結果は14,000文字で頭打ちにする。旧版と新版の全文を両方読ませると文脈が溢れて回答不能になるため、差分比較は <code>run_python</code> の <code>difflib</code> に寄せるようプロンプトで誘導した。</p>
+
+    <h3><span class="tag">工夫 2</span>安易な「わかりません」を突き返す</h3>
+    <p>採点は誤答が −1点、「わからない」が 0点。この設計は正しく怖がらせる一方で、<strong>少し探せば分かることまで諦める</strong>副作用を生む。そこで、ツール呼び出しが9回に満たないうちに諦めの語を含む回答を出そうとしたら、一度だけ差し戻して具体的な追加手段を提示する。offsetを進める、語を言い換える、全案件を一括走査する、画像を見る、の4つである。</p>
+
+    <div class="note">
+      <p class="h">やってはいけない誘導</p>
+      <p>差し戻しの文面には「推測を求めているのではない」と明記した。探索を促す圧力は、そのままにすると当てずっぽうを誘発する。問われている対象を取り違えたまま計算する誤り、近そうな別の指標で代用する誤りは、いずれも「確認できない」より低い評価になる。</p>
+    </div>
+
+    <h3><span class="tag">工夫 3</span>画像を検索可能にする</h3>
+    <p>OCRの結果を索引に載せていなかった当初、画像内の情報は <code>view_image</code> で直接見に行かない限り到達できなかった。253枚の読み取り結果をチャンクとして索引に加えたことで、<strong>キーワード検索から画像内の記述に届く</strong>ようになった。</p>
+  </div>
+</section>
+
+<!-- ============ 評価 ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">評価</span></div>
+  <div class="body">
+    <h2>自分で自分を採点してはいけない</h2>
+    <p>初期は回答したモデル自身に採点させていた。結果は 0.9000。同じモデルを公式採点器にかけたときの実測は 0.7333 で、<strong>自分の冗長さを甘く採点していた</strong>。</p>
+    <p>主催者の <code>crag.py</code>（判定モデルは gpt-5.2）をそのまま回す仕組みに切り替えてから、初めて改善の判定が可能になった。正解データのある検証セット30問に対して公式採点を回し、そこでのみ良し悪しを決める。回答生成にはローカルモデルだけを使い、APIキーは採点にしか使っていない。</p>
+    <pre>Perfect     +1     完全正解
+Acceptable  +0.5   軽微な誤りを含む有用な回答
+Missing      0     わからない
+Incorrect   −1     誤答・無関係</pre>
+    <p>この配点の含意は大きい。誤答は<strong>1問につき2点の損失</strong>になる。取れるはずの +1 を落とし、さらに −1 を負うからである。</p>
+  </div>
+</section>
+
+<!-- ============ 結果 ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">結果</span></div>
+  <div class="body">
+    <h2>提出と得点</h2>
+    <p>テスト100問は Public 30問・Private 70問に分割されていた。スコアを整数に戻すと分母が判明する。</p>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>提出</th><th class="num">Public<br>30問</th><th class="num">素点</th><th class="num">Private<br>70問</th><th class="num">素点</th></tr>
+        </thead>
+        <tbody>
+          <tr class="best"><td>v2 — 本命</td><td class="num">0.7333</td><td class="num">22.0</td><td class="num">0.5071</td><td class="num">35.5</td></tr>
+          <tr><td>v4 — プロンプト調整版</td><td class="num">0.6333</td><td class="num">19.0</td><td class="num">0.5000</td><td class="num">35.0</td></tr>
+          <tr><td>不完全な提出（30行）</td><td class="num">0.2333</td><td class="num">7.0</td><td class="num">0.2357</td><td class="num">16.5</td></tr>
+          <tr><td>破損した提出</td><td class="num">0.0500</td><td class="num">1.5</td><td class="num">0.2786</td><td class="num">19.5</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>ここに、この記録で最も重要な数字がある。v2 と v4 は <strong>Public で 3点差（0.1000）、Private で 0.5点差（0.0071）</strong>だった。</p>
+
+    <div class="note">
+      <p class="h">30問で判断してはいけなかった</p>
+      <p>Public は30問しかない。3問ぶれれば 0.1 動く。私はこの差を「プロンプト変更の効果」と解釈し、方針決定の根拠にしていた。Private の結果は、それが効果ではなく<strong>揺らぎ</strong>だったことを示している。</p>
+    </div>
+
+    <p>取りこぼしの内訳を逆算すると、Perfect 約50問・Incorrect 約14問・Missing 約6問となる。誤答14問を潰すだけで 35.5 → 63.5、すなわち 0.907 に届く。<strong>答えられないことではなく、間違って答えていることが問題だった。</strong></p>
+  </div>
+</section>
+
+<!-- ============ 効かなかったこと ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">失敗</span></div>
+  <div class="body">
+    <h2>効かなかった施策</h2>
+    <p class="lede">測って捨てたものを残しておく。同じ道を通る人の時間を節約できる。</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>施策</th><th>測定結果</th><th>判定</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>検証パス（同一モデル）</strong><br>回答後に別インスタンスが独立に確かめ、否定なら棄権</td>
+            <td>検証30問で誤答1件を捕捉（+0.0333）。しかし本番36問連続で否定ゼロ</td>
+            <td><span class="chip neg">実質無効</span></td>
+          </tr>
+          <tr>
+            <td><strong>検証パス（別モデル）</strong><br>独立性を上げるため35Bに交代</td>
+            <td>唯一の否定が正答に対する誤否定（−0.0333）</td>
+            <td><span class="chip neg">逆効果</span></td>
+          </tr>
+          <tr>
+            <td><strong>1問あたりの時間上限</strong><br>長引く設問を打ち切って効率化</td>
+            <td>長時間設問24問のうち18問は<em>働いていたから長かった</em>。850秒・49回の呼び出しで正答に到達した設問もあった</td>
+            <td><span class="chip neg">撤回</span></td>
+          </tr>
+          <tr>
+            <td><strong>回答の簡潔化プロンプト</strong><br>冗長さが減点要因という仮説</td>
+            <td>回答は既に平均17文字・中央値7文字。伸びしろ自体が無かった</td>
+            <td><span class="chip neg">空振り</span></td>
+          </tr>
+          <tr>
+            <td><strong>多数決（self-consistency）</strong><br>3回解いて一致を採る</td>
+            <td>1実行6時間 × 3 = 18時間。再現12時間の制約に収まらず断念</td>
+            <td><span class="chip neg">時間切れ</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>検証パスが機能しなかった理由ははっきりしている。<strong>検証役が回答役と同程度に弱い</strong>のである。同一モデルは自分の答えを支持し、別モデルは自信を持って正答を否定した。誤りを見抜くには、誤りを犯さない側の能力が要る。</p>
+  </div>
+</section>
+
+<!-- ============ 学び ============ -->
+<section class="sec">
+  <div class="rail"><span class="rail-label">学び</span></div>
+  <div class="body">
+    <h2>次に同じ課題をやるなら</h2>
+
+    <h3><span class="tag">01</span>機械で解ける設問を機械で解く</h3>
+    <p>失点の多くは、ヒストグラムの度数、座席表の位置関係、閾値を動かしたときのF1最大値、ピボットの抽出条件だった。<strong>いずれも決定的な計算で答えが一意に決まる</strong>。これらをモデルに「見せて読ませて」いたことが誤答の主因である。ヒストグラムを画像として読ませるのではなく、生データからExcelの分割規則で再計算する。座席表は画像の座標関係を解析する。モデルを賢くするより確実で、しかも安い。</p>
+
+    <h3><span class="tag">02</span>並列度を最初に測る</h3>
+    <p>1並列で100問6時間という前提のまま最終日まで進めた。終盤に3並列を試すと、同一設問の所要時間はわずか16%増で、<strong>総スループットは約2.6倍</strong>だった。DGX Spark は帯域律速で、バッチ処理が効く。これに早く気づいていれば1実行2.5時間となり、12時間枠に3回の実行が収まって多数決が実現できた。</p>
+
+    <h3><span class="tag">03</span>MoE を諦めない</h3>
+    <p>120B級のMoEは活性パラメータが約5Bで、密27Bより<strong>3倍前後速い</strong>可能性が高い。帯域律速の機材ではむしろMoEが有利になる。今回はツール呼び出しのJSONが23%の確率で壊れて断念したが、これは推論能力ではなく出力形式の問題であり、スキーマ制約デコードか修復リトライで潰せたはずだった。</p>
+
+    <h3><span class="tag">04</span>リーダーボードを改善の物差しにしない</h3>
+    <p>Public 30問の変動に方針を合わせ続けたことが、一貫した失敗だった。手元には正解データ付きの検証セットと公式採点器があった。<strong>測定の分解能を超えた意味を読み取らない</strong>という規律が、技術的な工夫より先に必要だった。</p>
+  </div>
+</section>
+
+<footer>
+  <p>ローカルLLM（qwen3.8:27b / Q4_K_M）を DGX Spark 上の Ollama で実行。回答生成に外部APIは使用していない。Python 7,128行。</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="DGX Spark の推論スタック調査 — DSpark・DFlash の投機的デコード、GPUDirect RDMA 非対応の公式見解、vLLM の設定と実測値を一次情報で確認した記録。">
+<title>DGX Spark 推論スタック調査</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+1:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+:root {
+  --paper:      #FBFBFD;
+  --surface:    #FFFFFF;
+  --surface-2:  #F1F2F7;
+  --rule:       #DDDFEA;
+  --rule-soft:  #EAECF3;
+  --text:       #1A1C26;
+  --text-2:     #575B70;
+  --text-3:     #858AA0;
+  --accent:     #3B4CD4;
+  --accent-2:   #6C77E8;
+  --accent-bg:  #ECEEFE;
+  --warn:       #9A5B00;
+  --warn-bg:    #FBF1DE;
+  --ok:         #1B7047;
+  --ok-bg:      #E4F3EA;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:     #0A0B11;
+    --surface:   #13151E;
+    --surface-2: #0F1119;
+    --rule:      #262A38;
+    --rule-soft: #1C1F2B;
+    --text:      #E7E8F1;
+    --text-2:    #A0A5B9;
+    --text-3:    #7A8095;
+    --accent:    #8E97FF;
+    --accent-2:  #6D78E0;
+    --accent-bg: #191C33;
+    --warn:      #DFA24C;
+    --warn-bg:   #29200F;
+    --ok:        #55C08A;
+    --ok-bg:     #10261B;
+  }
+}
+:root[data-theme="dark"] {
+  --paper:     #0A0B11;
+  --surface:   #13151E;
+  --surface-2: #0F1119;
+  --rule:      #262A38;
+  --rule-soft: #1C1F2B;
+  --text:      #E7E8F1;
+  --text-2:    #A0A5B9;
+  --text-3:    #7A8095;
+  --accent:    #8E97FF;
+  --accent-2:  #6D78E0;
+  --accent-bg: #191C33;
+  --warn:      #DFA24C;
+  --warn-bg:   #29200F;
+  --ok:        #55C08A;
+  --ok-bg:     #10261B;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  font-size: 15.5px;
+  line-height: 1.85;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1020px; margin: 0 auto; padding: 0 26px 90px; }
+
+/* masthead */
+.mast { padding: 64px 0 34px; }
+.kicker {
+  display: inline-block;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  padding: 2px 9px;
+  margin-bottom: 22px;
+}
+h1 {
+  font-family: "M PLUS 1", "Noto Sans JP", sans-serif;
+  font-weight: 700;
+  font-size: clamp(30px, 4.6vw, 46px);
+  line-height: 1.3;
+  letter-spacing: .005em;
+  margin: 0 0 18px;
+  text-wrap: balance;
+}
+.standfirst { font-size: 16.5px; color: var(--text-2); max-width: 64ch; margin: 0 0 26px; }
+.srcline {
+  font-size: 13px;
+  color: var(--text-3);
+  border-top: 1px solid var(--rule);
+  padding-top: 16px;
+}
+.srcline b { color: var(--text-2); font-weight: 500; }
+
+/* provenance legend */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 16px 18px;
+  margin: 28px 0 0;
+}
+.legend p { margin: 0 0 4px; font-size: 13.5px; color: var(--text-2); width: 100%; }
+
+.pv {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  padding: 2px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.pv.a { color: var(--ok);     background: var(--ok-bg);     border-color: var(--ok); }
+.pv.b { color: var(--warn);   background: var(--warn-bg);   border-color: var(--warn); }
+.pv.c { color: var(--accent); background: var(--accent-bg); border-color: var(--accent); }
+
+/* topic blocks */
+.topic {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  margin: 30px 0;
+  overflow: hidden;
+}
+.topic > header {
+  padding: 20px 24px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-2);
+}
+.topic h2 {
+  font-family: "M PLUS 1", sans-serif;
+  font-weight: 700;
+  font-size: 23px;
+  margin: 0 0 6px;
+  letter-spacing: .01em;
+}
+.topic h2 span {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-3);
+  margin-left: 10px;
+  letter-spacing: 0;
+}
+.topic > header p { margin: 0; font-size: 13.5px; color: var(--text-2); }
+.topic > .in { padding: 22px 24px 26px; }
+.topic > .in > *:first-child { margin-top: 0; }
+.topic > .in > *:last-child { margin-bottom: 0; }
+
+h3 {
+  font-family: "M PLUS 1", sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  margin: 28px 0 10px;
+}
+h3:first-child { margin-top: 0; }
+p { margin: 0 0 14px; max-width: 68ch; }
+strong { font-weight: 700; }
+em { font-style: normal; background: var(--accent-bg); padding: 0 3px; border-radius: 2px; }
+code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: .86em;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: .08em .34em;
+  word-break: break-word;
+}
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+ul { margin: 0 0 14px; padding-left: 1.15em; max-width: 68ch; }
+li { margin-bottom: 6px; }
+li::marker { color: var(--accent); }
+
+.scroll {
+  overflow-x: auto;
+  margin: 18px 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-size: 11px;
+  letter-spacing: .07em;
+  color: var(--text-3);
+  font-weight: 500;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.mono { font-family: "JetBrains Mono", monospace; font-size: 12.5px; }
+
+pre {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 16px 0;
+}
+
+.callout {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface-2);
+  padding: 15px 18px;
+  margin: 20px 0;
+}
+.callout.warn { border-left-color: var(--warn); }
+.callout .h {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+.callout.warn .h { color: var(--warn); }
+.callout p:last-child { margin-bottom: 0; }
+
+.srcs { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--rule); font-size: 12.5px; }
+.srcs .h { font-family: "JetBrains Mono", monospace; font-size: 10.5px; letter-spacing: .1em; color: var(--text-3); margin: 0 0 6px; text-transform: uppercase; }
+.srcs ul { padding-left: 1.05em; margin: 0; }
+.srcs li { margin-bottom: 3px; color: var(--text-2); }
+
+footer {
+  margin-top: 46px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+  color: var(--text-3);
+}
+footer h3 { color: var(--text); margin-top: 0; }
+
+@media (max-width: 720px) {
+  .wrap { padding: 0 18px 60px; }
+  .mast { padding: 44px 0 26px; }
+  .topic > header, .topic > .in { padding-left: 17px; padding-right: 17px; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="mast">
+  <span class="kicker">技術調査 / 2026-08-20</span>
+  <h1>DGX Spark 推論スタック調査</h1>
+  <p class="standfirst">帯域律速の机上機で大規模モデルをどう回すか。投機的デコードの二系統（DSpark・DFlash）、NVIDIA が公式に「できない」と明記した制約、そして vLLM の実測値を、一次情報に当たって確認した記録。</p>
+  <p class="srcline">
+    <b>調査の起点：</b> @sukimaengineer「DGX Spark はなぜ DeepSeek V4 Flash を 115 tok/s で回せるのか？」（Qiita, 2026-08-09）— 理論とルーフライン<br>
+    <b>　　　　　　</b> Pju「DGX Spark 1台で DeepSeek-V4-Flash 0731 を llama.cpp + DSpark 投機デコードで動かす完全レシピ」（note, 2026-08-05）— 実測と手順<br>
+    <b>方法：</b> 2記事の記述を出発点に、arXiv・NVIDIA 公式文書・vLLM 公式ブログ・GitHub で裏取り
+  </p>
+
+  <div class="legend">
+    <p>本文中の記述には、確認の度合いを示す印を付けています。</p>
+    <span class="pv a">一次情報で確認</span>
+    <span class="pv b">記事のみ・未確認</span>
+    <span class="pv c">本調査での解釈</span>
+  </div>
+</header>
+
+<!-- ===================== DSpark ===================== -->
+<section class="topic">
+  <header>
+    <h2>DSpark<span>arXiv:2607.05147</span></h2>
+    <p>Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation — 2026年7月6日投稿</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv a">一次情報で確認</span> 著者は33名で、DeepSeek の Wenfeng Liang を含みます。論文自体が <em>DeepSeek-V4 のサーバシステム上で実トラフィックを使って評価</em>されており、研究成果というより本番投入された仕組みの報告という性格です。</p>
+
+    <h3>解こうとしている問題</h3>
+    <p>投機的デコードは「安いドラフトモデルに先読みさせ、本命モデルが並列に検証する」手法です。近年の並列ドラフタは1回の順伝播で長いトークン列を提案できますが、二つの弱点があります。</p>
+    <ul>
+      <li><strong>受理率の急速な減衰</strong> — トークン間の依存関係を持たないため、ブロックの後ろへ行くほど当たらなくなる（suffix decay）</li>
+      <li><strong>バッチ容量の浪費</strong> — 棄却される可能性の高いトークンまで一律に検証するため、多重同時実行時にスループットが落ちる</li>
+    </ul>
+
+    <h3>二つの仕掛け</h3>
+    <p><strong>半自己回帰アーキテクチャ。</strong> 計算量の大きいドラフト用バックボーンは完全並列のまま保ち、そこに<em>軽量な逐次出力ヘッドだけを付け足す</em>ことで、局所的な遷移情報を注入します。並列モデルのドラフト速度を保ったまま suffix decay を緩和する、という設計です。</p>
+    <p><strong>信頼度スケジュール検証。</strong> 位置ごとの「接頭辞が生き残る確率」を推定する信頼度ヘッドと、ハードウェア特性を織り込んだスケジューラを組み合わせ、<em>リクエストごとに検証長を動的に決めます</em>。GPU に余裕があれば深く投機し、混んでいれば浅くする、という負荷対応です。</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>報告値</th><th>比較対象</th><th>条件</th><th>確認</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>ユーザーあたり生成速度 <strong>+60〜85%</strong></td>
+            <td>MTP-1（本番ベースライン）</td>
+            <td>DeepSeek-V4 サーバ／実トラフィック</td>
+            <td><span class="pv a">確認</span></td>
+          </tr>
+          <tr>
+            <td>受理長 +26.7〜30.9%</td>
+            <td>EAGLE-3</td>
+            <td>記事の記述。abstract では未確認</td>
+            <td><span class="pv b">未確認</span></td>
+          </tr>
+          <tr>
+            <td>受理長 +16.3〜18.4%</td>
+            <td>DFlash</td>
+            <td>同上</td>
+            <td><span class="pv b">未確認</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <p class="h">注意</p>
+      <p>記事は「DeepSeek V4 Flash の配布物にドラフトモジュールが同梱され、追加学習なしで投機的デコードを有効化できる」と述べています。<strong>この点は一次情報で確認できていません。</strong>「DeepSeek-V4」は論文中に登場しますが、「V4 Flash」という配布形態の存在と同梱の事実は別途確認が必要です。</p>
+    </div>
+
+    <div class="srcs">
+      <p class="h">出典</p>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2607.05147">arXiv:2607.05147 — DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== DFlash ===================== -->
+<section class="topic">
+  <header>
+    <h2>DFlash<span>arXiv:2602.06036 / ICML 2026</span></h2>
+    <p>Block Diffusion for Flash Speculative Decoding — v1 2026年2月5日、v2 2026年5月28日</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv a">一次情報で確認</span> 著者は Jian Chen、Yesheng Liang、Zhijian Liu の3名（Z Lab）。<strong>ICML 2026 採択</strong>。DSpark より半年早く、系譜としては先行します。</p>
+
+    <h3>拡散モデルをドラフタに使う</h3>
+    <p>従来手法（EAGLE-3 など）のドラフト生成は<strong>自己回帰的</strong>で、1トークンずつ順に出すため逐次処理から逃れられません。DFlash はここを置き換えます。</p>
+    <p><em>軽量なブロック拡散モデルが、1回の順伝播で K トークンのブロック全体を並列に生成</em>します。ドラフトモデルは本命モデルから抽出した文脈特徴を条件として受け取り、本命モデルは K トークンを並列に検証します。</p>
+
+    <div class="callout">
+      <p class="h">なぜ効くか</p>
+      <p>並列であるため、<strong>ドラフト予算（K）を増やしてもレイテンシがそれに比例して増えません</strong>。従来の投機的デコードが頭打ちになっていた「先読みを深くすると遅くなる」という制約を外せる、というのが主張の核です。</p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>報告値</th><th>内容</th><th>確認</th></tr></thead>
+        <tbody>
+          <tr><td class="num">6倍超</td><td>ロスレス加速（複数モデル・複数タスク）</td><td><span class="pv a">確認</span></td></tr>
+          <tr><td class="num">最大 2.5倍</td><td>EAGLE-3（当時のSOTA）に対する上乗せ</td><td><span class="pv a">確認</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>「ロスレス」は重要な語です。投機的デコードは<strong>検証を本命モデルが行うため、出力分布が変わりません</strong>。量子化や蒸留と違い、速度と引き換えに精度を失わないという性質があります。</p>
+
+    <div class="callout warn">
+      <p class="h">確認できなかった点</p>
+      <p>ドラフトモデルの規模、学習方法、評価に使ったハードウェアは、abstract ページからは取得できませんでした。実装検討の際は PDF 本文の確認が必要です。</p>
+    </div>
+
+    <div class="srcs">
+      <p class="h">出典</p>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2602.06036">arXiv:2602.06036 — DFlash: Block Diffusion for Flash Speculative Decoding</a></li>
+        <li><a href="https://z-lab.ai/projects/dflash/">Z Lab — DFlash プロジェクトページ</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== NVIDIA KB ===================== -->
+<section class="topic">
+  <header>
+    <h2>NVIDIA 公式ナレッジベース<span>a_id 5780 / 移植ガイド</span></h2>
+    <p>DGX Spark で「できないこと」の公式見解 — GPUDirect RDMA 非対応</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv a">一次情報で確認</span> ナレッジベース記事本体（<code>a_id/5780</code>）は自動取得が 403 で拒否されるため、<strong>同内容を記載した公式移植ガイドと開発者フォーラムで確認</strong>しました。</p>
+
+    <h3>動かないもの</h3>
+    <pre>GPUDirect RDMA        非対応
+  ├─ nvidia-peermem   動作しない
+  ├─ dma-buf          動作しない
+  └─ GDRCopy          動作しない</pre>
+
+    <h3>理由は統合メモリそのもの</h3>
+    <p>公式の説明はこうです。<em>ピン留めデバイスメモリ確保子（<code>cudaMalloc</code> など）が返すシステムメモリは、CPU コンプレックスからも、PCI Express 上の I/O 周辺機器（Mellanox NIC など）からもコヒーレントにアクセスできない</em>。</p>
+    <p><span class="pv c">本調査での解釈</span> より根本的には、<strong>GB10 には GPU 専用メモリが存在しません</strong>。あるのは CPU に接続された LPDDR5 だけです。NIC が直接データを書き込むべき「GPU のメモリ」が物理的に無いため、GPUDirect RDMA という概念自体が成立しません。</p>
+
+    <div class="callout">
+      <p class="h">回避策（公式）</p>
+      <p>アプリケーションは実行時に <code>CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED</code> と <code>CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORT</code> を問い合わせ、対応可否を自分で判定すること。Linux の RDMA アプリケーションでは、通信バッファを <code>cudaHostAlloc</code> で確保し、<code>ib_reg_mr</code> で登録する。</p>
+    </div>
+
+    <p><span class="pv c">本調査での解釈</span> これは<strong>複数台クラスタを組む際に直接効いてくる制約</strong>です。NVIDIA 自身が2〜4台構成を公式にサポートしている一方で、ノード間のデータ移動は GPU 直結の RDMA ではなく、ホストメモリを経由する経路になります。単体運用では意識する必要はありませんが、スケールアウトを前提に設計するなら最初に把握しておくべき点です。</p>
+
+    <div class="srcs">
+      <p class="h">出典</p>
+      <ul>
+        <li><a href="https://nvidia.custhelp.com/app/answers/detail/a_id/5780/~/is-gpudirect-rdma-supported-on-dgx-spark">NVIDIA KB a_id 5780 — Is GPUDirect RDMA supported on DGX Spark?</a>（自動取得は403）</li>
+        <li><a href="https://docs.nvidia.com/dgx/dgx-spark-porting-guide/porting/cuda.html">DGX Spark Porting Guide — CUDA</a></li>
+        <li><a href="https://forums.developer.nvidia.com/t/gpu-direct-rdma-not-working-on-dgx-spark-systems-nvidia-peermem-module-fails-to-load/349837">NVIDIA Developer Forums — nvidia-peermem module fails to load</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== vLLM ===================== -->
+<section class="topic">
+  <header>
+    <h2>vLLM<span>公式ブログ 2026-06-01 / GitHub</span></h2>
+    <p>DGX Spark 上での推奨構成と実測スループット</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv a">一次情報で確認</span> vLLM 公式が <a href="https://vllm.ai/blog/2026-06-01-vllm-dgx-spark">「vLLM on the DGX Spark: Architecture, Configuration, and Local Evaluation」</a>を公開しています。128GB の統合メモリプールにより<strong>最大 200B パラメータの NVFP4 モデル</strong>をローカル実行できる、という位置づけです。</p>
+
+    <h3>推奨される起動オプション</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>オプション</th><th class="num">値</th><th>根拠</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">--gpu-memory-utilization</td><td class="num">0.85</td><td>統合メモリプール内で OS とコンテナランタイムの余裕を確保</td></tr>
+          <tr><td class="mono">--max-model-len</td><td class="num">131072</td><td>システムプロンプト・ツール定義・履歴の容量</td></tr>
+          <tr><td class="mono">--max-num-seqs</td><td class="num">4</td><td>小バッチ最適化。高同時実行では TTFT が跳ねる</td></tr>
+          <tr><td class="mono">--reasoning-parser</td><td class="num">nemotron_v3</td><td>Nemotron-3 系の推論パース</td></tr>
+          <tr><td class="mono">--enable-auto-tool-choice</td><td class="num">—</td><td>ツール呼び出し対応</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>実測スループット</h3>
+    <p>Nemotron-3-Super-120B-A12B-NVFP4（120B総パラメータ／12B活性）での公式計測値です。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>シナリオ</th><th class="num">Prefill tok/s</th><th class="num">Decode tok/s</th><th class="num">TTFT</th></tr></thead>
+        <tbody>
+          <tr><td>短プロンプト・短生成</td><td class="num">140</td><td class="num">約23</td><td class="num">0.42 s</td></tr>
+          <tr><td>長プロンプト・短生成</td><td class="num">1,877</td><td class="num">22.7</td><td class="num">3.85 s</td></tr>
+          <tr><td>中プロンプト・長生成</td><td class="num">1,639</td><td class="num">23.4</td><td class="num">1.12 s</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>デコードは 22.7〜23.7 tok/s で安定</strong>します。適用対象として推奨されているのは<em>活性パラメータ 10〜15B 程度の 100〜130B MoE を NVFP4 で動かす</em>構成で、高同時実行ではなく単一利用者の小バッチ向けと明記されています。</p>
+
+    <h3>運用上の注意</h3>
+    <ul>
+      <li><strong>冷起動</strong> — 最初のリクエストで JIT コンパイルに約25秒。起動時に <code>max_tokens=3</code> の小プロンプトで暖機する</li>
+      <li><strong>KVキャッシュ</strong> — ページング式で断片化を防止。単一利用者では利用率5%以下が実績値</li>
+      <li><strong>FP8 KVキャッシュ</strong> — メモリ逼迫時の選択肢だが、モデルの予測性に影響する可能性あり</li>
+      <li><strong>監視</strong> — <code>/metrics</code> の <code>vllm:kv_cache_usage_perc</code> と TTFT ヒストグラム</li>
+      <li><strong>イメージ</strong> — <code>vllm/vllm-openai:cu130-nightly</code>、または検証済みの固定タグ</li>
+    </ul>
+
+    <h3>SM121 対応の現況</h3>
+    <p>DGX Spark の GPU は <code>sm_121</code> で、vLLM の対応は段階的に進んできました。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>事項</th><th>状況</th><th>確認</th></tr></thead>
+        <tbody>
+          <tr><td>Issue #31128（SM121 対応要望）</td><td><strong>Closed</strong>。PR #37700 で解決</td><td><span class="pv a">確認</span></td></tr>
+          <tr><td>Issue #36821（aarch64 での sm_121）</td><td>別途起票あり</td><td><span class="pv a">確認</span></td></tr>
+          <tr><td><code>--enforce-eager</code> 回避策</td><td>速度が20〜30%低下すると報告</td><td><span class="pv a">確認</span></td></tr>
+          <tr><td>0.26.0 が DeepSeek V4 Flash を配信不可、PR #41834 が未マージ</td><td>記事の記述</td><td><span class="pv b">未確認</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <p class="h">解釈の分かれ目</p>
+      <p><span class="pv c">本調査での解釈</span> 記事は「正式リリース版 vLLM では動かず、コミュニティのカスタムイメージが前提」と述べていますが、これは<strong>特定の新しいチェックポイント（DeepSeek V4 Flash）に限った話</strong>と読むべきです。vLLM 自体は公式ブログと NVIDIA のブログの双方で DGX Spark 上の推奨構成として扱われており、Qwen3.6-35B や Nemotron-3 では正規に動作します。「vLLM は DGX Spark で使えない」という一般化はできません。</p>
+    </div>
+
+    <h3>NVIDIA 側からの高速化（2026年6月更新）</h3>
+    <p><span class="pv a">一次情報で確認</span> Qwen3.6-35B の NVFP4 チェックポイントを vLLM で動かし、<strong>最大2.6倍</strong>のスループット改善。寄与した要素は以下と明記されています。</p>
+    <pre>vLLM CUDA Graph support for MTP with FlashInfer
+BF16 autotuning across FlashInfer MoE kernels
+TinyGEMM and cuBLAS BF16 paths</pre>
+    <p>MTP（Multi-Token Prediction）が CUDA Graph に載ったことが含まれます。<strong>投機的デコードがカーネル最適化と組み合わさって初めて実効性能になる</strong>、という構図がここに表れています。</p>
+
+    <h3>複数台構成</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>台数</th><th>接続</th><th class="num">統合メモリ</th><th>備考</th></tr></thead>
+        <tbody>
+          <tr><td class="num">2</td><td>QSFPケーブル直結（スイッチ不要）</td><td class="num">256 GB</td><td>約400Bパラメータ級まで</td></tr>
+          <tr><td class="num">3</td><td>リング（3本／両CX-7ポート使用）</td><td class="num">384 GB</td><td>NCCL 2.30u1 で対応</td></tr>
+          <tr><td class="num">2〜4</td><td>QSFPスイッチ経由</td><td class="num">最大 512 GB</td><td>大規模MoE向け</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>必要機材は ConnectX-7 NIC（200 Gbps RoCE）と QSFP56-DD スイッチ（最小4ポート、スイッチング容量 0.8〜1.6 Tbps 以上）。帯域と遅延の検証は <code>ib_write_bw</code> / <code>ib_write_lat</code> で行う、と指定されています。設定は NVIDIA Sync アプリの Cluster Assistant が自動化します。</p>
+
+    <div class="srcs">
+      <p class="h">出典</p>
+      <ul>
+        <li><a href="https://vllm.ai/blog/2026-06-01-vllm-dgx-spark">vLLM Blog — vLLM on the DGX Spark: Architecture, Configuration, and Local Evaluation</a></li>
+        <li><a href="https://developer.nvidia.com/blog/run-local-ai-agents-with-faster-models-and-multi-node-clustering-on-nvidia-dgx-spark/">NVIDIA Technical Blog — Run Local AI Agents with Faster Models and Multi-Node Clustering on NVIDIA DGX Spark</a></li>
+        <li><a href="https://github.com/vllm-project/vllm/issues/31128">vLLM Issue #31128 — Add support of Blackwell SM121 (DGX Spark)</a></li>
+        <li><a href="https://docs.nvidia.com/sync/latest/cluster-assistant.html">NVIDIA Sync User Guide — Cluster Assistant</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== llama.cpp 実践 ===================== -->
+<section class="topic">
+  <header>
+    <h2>llama.cpp + DSpark<span>実機レシピ / note, 2026-08-05</span></h2>
+    <p>DGX Spark 1台で 84.7 GiB のモデルを 0.94M コンテキストで動かした実測記録</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv b">記事のみ・未確認</span> 以下は Pju 氏による実機検証の記述です。<strong>一次情報（llama.cpp のソース）での裏取りは行っていません</strong>が、コミットハッシュ・具体的な数値・失敗の記録まで含む詳細な手順書であり、他のどの資料よりも実運用に近い情報です。</p>
+
+    <div class="callout">
+      <p class="h">最も重要な発見</p>
+      <p><strong>llama.cpp は既に DSpark 投機デコードに対応済み</strong>。「未対応」とされていたのはドキュメントが古かっただけで、コードには <code>src/models/dflash.cpp</code>（DSV4 の MLA・MoE・Shared expert 対応）と <code>convert_hf_to_gguf.py</code> の <code>--dspark</code> フラグが実装されていた、とのことです。vLLM の対応を待つ必要がない可能性を示します。</p>
+    </div>
+
+    <h3>ビルドと環境</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>項目</th><th>値</th><th>備考</th></tr></thead>
+        <tbody>
+          <tr><td>llama.cpp</td><td class="mono">96278e3（2026-08-03）</td><td>ビルド約150秒</td></tr>
+          <tr><td>CUDA アーキテクチャ</td><td class="mono">-DCMAKE_CUDA_ARCHITECTURES=121</td><td>GB10 専用</td></tr>
+          <tr><td>コンパイラ指定</td><td class="mono">CUDACXX=/usr/local/cuda/bin/nvcc</td><td>PATH に無いため明示が必須</td></tr>
+          <tr><td>transformers</td><td class="mono">4.57.6</td><td><strong>5.7.0 は deepseek_v4 未対応</strong></td></tr>
+          <tr><td>本体モデル</td><td class="mono">DeepSeek-V4-Flash-0731-UD-IQ2_M</td><td>84.7 GiB / 3シャード</td></tr>
+          <tr><td>ドラフタ</td><td class="mono">dspark-drafter-0731-q8_0.gguf</td><td>10.9 GB / mtp.* テンソル4,705個から変換</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>投機の深さは「浅く」した方が速い</h3>
+    <p>ドラフト採用の下限確率 <code>--spec-draft-p-min</code> を上げると、生成するドラフトが減る代わりに受理率が跳ね上がります。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th class="num">p_min</th><th class="num">受理率</th><th class="num">ドラフト生成量</th></tr></thead>
+        <tbody>
+          <tr><td class="num">0.0</td><td class="num">19.4%</td><td class="num">1,265 token</td></tr>
+          <tr><td class="num">0.3</td><td class="num"><strong>39.6%</strong></td><td class="num"><strong>510 token</strong>（60%削減）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><span class="pv c">本調査での解釈</span> 当たらないドラフトを大量に作ること自体が無駄な演算です。<em>確度の低い先読みを捨てる方が、全体として速くなる</em>という、投機的デコードの調整における基本が数字で出ています。</p>
+
+    <h3>投機の利得は「出力の決まりやすさ」で決まる</h3>
+    <p>本記事で最も価値のある知見です。同じ構成でも、生成内容によって速度が2倍以上変わります。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>出力の種類</th><th class="num">速度</th><th class="num">受理率</th><th class="num">1ステップあたり</th></tr></thead>
+        <tbody>
+          <tr><td>思考OFF・決定論的（数字列・コード）</td><td class="num"><strong>50〜54 t/s</strong></td><td class="num">99%</td><td class="num">5.85 tok</td></tr>
+          <tr><td>エージェント推論（実運用）</td><td class="num">20.3 t/s</td><td class="num">66.2%</td><td class="num">—</td></tr>
+          <tr><td>思考ON・自由な日本語長文</td><td class="num">約25 t/s</td><td class="num">47.9%</td><td class="num">2.52 tok</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>著者の結論は明快です。<strong>DSpark は「常に40 t/s超」ではなく、出力が決定的なほど投機が効く</strong>。次の単語が予測しやすい文章ほどドラフトが当たる、という当然の帰結ですが、カタログ値と実運用の差を説明します。</p>
+
+    <h3>コンテキストキャッシュ</h3>
+    <p>61,353 トークンの同一プロンプトを再実行した結果です。</p>
+    <pre>初回（COLD）    201.1 秒
+2回目以降（WARM）  4.5 秒     約45倍・キャッシュヒット率 99.99%</pre>
+    <p><span class="pv c">本調査での解釈</span> <strong>エージェント型の運用に直結します。</strong> エージェントは1問を解く間、毎回の呼び出しで会話全体を送り直します。この接頭辞が使い回せるかどうかが総時間を支配します。私たちが Ollama で1問あたり平均11.7回の呼び出しを回せていたのも、同じ仕組みが働いていたためです。</p>
+
+    <h3>KVキャッシュ量子化と文脈長</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>KVキャッシュ</th><th class="num">到達文脈長</th><th class="num">メモリ</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">F16</td><td class="num">約 0.5M</td><td class="num">111 GiB</td></tr>
+          <tr><td class="mono">q8_0</td><td class="num"><strong>0.94M</strong></td><td class="num">107 GiB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>起動オプションは <code>--spec-type draft-dspark</code>、<code>--spec-draft-n-max 5</code>、<code>--spec-draft-p-min 0.3</code>、<code>--ctx-size 819200</code>、<code>--cache-type-k/v q8_0</code>、<code>--parallel 1</code>、<code>-ngl 99</code>。</p>
+
+    <h3>実測ベンチマーク（1台・c=1・思考ON）</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>項目</th><th class="num">実測</th></tr></thead>
+        <tbody>
+          <tr><td>Prefill（pp128）</td><td class="num">153〜157 t/s</td></tr>
+          <tr><td>Prefill（pp1024）</td><td class="num">329〜332 t/s</td></tr>
+          <tr><td>Prefill（pp4096）</td><td class="num">334〜340 t/s</td></tr>
+          <tr><td>Decode（tg128）</td><td class="num"><strong>24.9〜26.0 t/s</strong></td></tr>
+          <tr><td>TTFR（pp4096）</td><td class="num">10.6 秒</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <p class="h">2記事の数値が食い違う</p>
+      <p>Qiita 記事の表題は <strong>115 tok/s</strong>、本記事の実測は<strong>エージェント運用で 20.3 t/s、決定論的出力でも 50〜54 t/s</strong> です。条件（台数、バッチ、セッション集約、出力の性質）が異なるため単純比較はできませんが、<strong>カタログ的な最大値と実運用の値には数倍の開きがある</strong>と考えるべきです。私たちの用途はエージェント推論なので、参照すべきは 20 t/s 台の方です。</p>
+    </div>
+
+    <h3>品質と運用の注意</h3>
+    <ul>
+      <li><strong>2bit量子化の限界</strong> — UD-IQ2_M は思考OFF時に算数を誤る（2+2=5 が温度0で再現）。思考ONなら正答。<em>量子化を攻めるなら思考モードとの併用が前提</em></li>
+      <li><strong>起動に約6分</strong> — モデルロード。常駐運用が前提になる</li>
+      <li><strong>並列不可</strong> — <code>--parallel 1</code> 固定のためリクエストはキューイングされる</li>
+      <li><strong>巨大な cold リクエスト</strong> — 198K トークンの prefill で約18.7分（177 t/s）</li>
+      <li><strong>停止コマンド</strong> — <code>pkill -x llama-server</code>。<code>pkill -f</code> は SSH セッション自体を巻き込んで落とす</li>
+    </ul>
+
+    <div class="callout">
+      <p class="h">発熱への対処</p>
+      <p>著者は <strong>gb10-thermal-governor</strong>（MITライセンス）を自作し、GPU クロックを PID 制御しています。<em>DGX Spark は全力稼働で 90°C を超える</em>ため、設定温度 80°C を保ちながらスループットを最大化する仕組みです。実測でクロックを 2007〜2881 MHz に絞りつつ、温度誤差 ±4°C、パニック閾値 94°C には未到達とのこと。無人環境での長時間運用には、この種の制御が要ります。</p>
+    </div>
+
+    <div class="srcs">
+      <p class="h">出典</p>
+      <ul>
+        <li><a href="https://note.com/pju/n/n6602bbfc2cfd">note — DGX Spark 1台で DeepSeek-V4-Flash 0731 を llama.cpp + DSpark 投機デコードで動かす完全レシピ（Pju, 2026-08-05）</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 総合 ===================== -->
+<section class="topic">
+  <header>
+    <h2>この機材にとっての意味</h2>
+    <p>帯域律速という弱点に、投機的デコードがなぜ効くのか</p>
+  </header>
+  <div class="in">
+
+    <p><span class="pv c">本調査での解釈</span> DGX Spark の帯域は約273 GB/s で、コンシューマGPU（3090で約936 GB/s、5090で約1,800 GB/s）に大きく劣ります。密モデルの生成では、毎トークン全重みを読むため、この差がそのまま速度差になります。</p>
+
+    <p>投機的デコードが<strong>この機材と噛み合う理由</strong>は、ボトルネックの付け替えにあります。</p>
+
+    <pre>通常のデコード   1トークンごとに全重みを読む   → 帯域を使い切る／演算は遊ぶ
+投機的デコード   Kトークンをまとめて1回で検証   → 演算を使う／帯域の読み出し回数が減る</pre>
+
+    <p>本命モデルの重み読み出しが K 分の1に減り、代わりに余っていた演算資源が使われます。<strong>余っている資源で、詰まっている資源を肩代わりする</strong>構図であり、演算に余裕があって帯域が細い機械ほど利得が大きくなります。DGX Spark はまさにその形をしています。</p>
+
+    <div class="callout">
+      <p class="h">実測との照合</p>
+      <p>私たちが Ollama で密27B（Q4_K_M / 18GB）を回したときの実効は<strong>およそ14 tok/s</strong>でした。同じ機材での他者の実測は次のとおりです。</p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>構成</th><th class="num">Decode</th><th>出典</th></tr></thead>
+          <tbody>
+            <tr><td>密27B Q4_K_M / Ollama</td><td class="num">約14 t/s</td><td>本プロジェクト実測</td></tr>
+            <tr><td>120B MoE（活性12B）NVFP4 / vLLM</td><td class="num">22.7〜23.7 t/s</td><td>vLLM 公式</td></tr>
+            <tr><td>DeepSeek-V4-Flash IQ2_M + DSpark / llama.cpp</td><td class="num">24.9〜26.0 t/s</td><td>note 実測</td></tr>
+            <tr><td>同上・エージェント推論の実運用</td><td class="num">20.3 t/s</td><td>note 実測</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>桁違いに大きいモデルが、密27Bより速い。</strong> MoE のスパース性、低ビット量子化、投機的デコード、カーネル最適化の積み上げによるものです。一方で、エージェント推論という私たちの用途では 20 t/s 台に落ち着く点も押さえておく必要があります。</p>
+    </div>
+
+    <h3>取るべき順序</h3>
+    <ul>
+      <li><strong>密モデルをやめて MoE へ。</strong> これが最も効きます。活性10〜15B の 100〜130B MoE が vLLM 公式の推奨帯です</li>
+      <li><strong>推論基盤を Ollama から乗り換える。</strong> vLLM（公式の推奨構成と実測値が揃う）か llama.cpp（DSpark 対応済み・巨大文脈が可能）。ツール呼び出しのパース経路が異なるため、<em>gpt-oss:120b で遭遇した JSON 破損が解消される可能性</em>があり、これは保留中の課題への回答にもなります</li>
+      <li><strong>投機的デコードは条件を選んで使う。</strong> MTP は既に vLLM の CUDA Graph に載り、DSpark は llama.cpp に実装済み。ただし<em>受理率は出力の決まりやすさ次第</em>で、自由な日本語生成では利得が半減します</li>
+      <li><strong>発熱制御を先に用意する。</strong> 全力稼働で90°Cを超えます。長時間の無人実行を行うなら、クロック制御なしには回せません</li>
+    </ul>
+
+    <div class="callout warn">
+      <p class="h">この調査の限界</p>
+      <p>本文の数値はすべて<strong>各出典が公表した値</strong>であり、私たちの機材で追試したものではありません。特に tok/s はモデル・量子化・文脈長・バッチサイズ・出力の性質で大きく変わります。note 記事が示したとおり、<strong>同一構成でも生成内容によって2倍以上動きます</strong>。導入判断の前に、実際に使うモデルとワークロードで計測してください。</p>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  <h3>調査メモ</h3>
+  <p><strong>一次情報で裏付けが取れたもの：</strong> DSpark・DFlash の論文と主要な主張、GPUDirect RDMA 非対応とその理由・回避策、vLLM 公式の DGX Spark 向け設定と実測値、SM121 対応の経緯（Issue #31128 → PR #37700）、NVIDIA の 2.6倍高速化と 2〜4台クラスタ構成。</p>
+  <p><strong>確認できていないもの：</strong> DeepSeek V4 Flash の配布形態とドラフタ同梱、DSpark の受理長改善率（EAGLE-3比 26.7〜30.9%、DFlash比 16.3〜18.4%）、vLLM 0.26.0 と PR #41834 の状況、note 記事の実機検証内容全般（llama.cpp のソースに当たっていない）。Qiita 記事の表題である「115 tok/s」も追試していません。</p>
+  <p><strong>2記事の関係：</strong> Qiita はルーフラインから理論値を分解する論考、note は1台での実機手順と実測。前者が「なぜ速くなりうるか」を、後者が「実際に何 tok/s 出るか」を扱っており、後者の方が私たちの用途には近い数値を示しています。</p>
+  <p>調査日：2026年8月20日。リンク先の内容は更新される可能性があります。</p>
+</footer>
+
+</div>
+</body>
+</html>
