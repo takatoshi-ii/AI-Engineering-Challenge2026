@@ -146,11 +146,25 @@ python rag/tools/validate_submission.py
 # 回答の形式監査（設問が要求する形式と食い違う回答を検出）
 python rag/tools/audit_answers.py --tag <tag> --questions test
 
-# 主催者の採点器で検証セットを採点（OPENAI_API_KEY が必要）
-python rag/tools/official_eval.py --tag <tag> --questions valid
+# 正解データとの機械的な照合（LLMの判定に依存しない）
+python rag/tools/strict_eval.py --tag <tag> --questions valid
 ```
 
-`official_eval.py` は採点にのみ外部APIを使用します。回答生成には使いません。
+### 同梱していないものに依存するツール
+
+`rag/tools/official_eval.py` は、主催者が配布した採点スクリプト（`evaluation/crag.py` と正解データ `evaluation/data/valid_txt.csv`）を呼び出します。**これらは再配布しないため同梱しておらず、このツールは動作しません。**
+
+同等の仕組みを用意する場合は、リポジトリ直下に次の構成を置いてください。
+
+```
+evaluation/
+├── crag.py                 採点の実行スクリプト
+├── data/valid_txt.csv      正解データ
+├── submit/                 採点対象の書き出し先
+└── result/scoring.csv      判定結果
+```
+
+`official_eval.py` は、保存済みの回答を `evaluation/submit/predictions.csv` に書き出し、`crag.py` を実行して `result/scoring.csv` を読み戻す、という流れで動きます。採点にのみ外部APIを使用し、回答生成には使いません。
 
 ---
 
